@@ -10,9 +10,15 @@ API=${AWX_URL:-http://127.0.0.1:8080}/api/v2
 AUTH="admin:${DJANGO_SUPERUSER_PASSWORD:?}"
 
 api() {
-    local method=$1 path=$2 data=${3:-}
-    curl -fsS -u "$AUTH" -X "$method" -H 'Content-Type: application/json' \
-        ${data:+-d "$data"} "$API$path"
+    local method=$1 path=$2 data=${3:-} body code
+    body=$(mktemp)
+    code=$(curl -sS -o "$body" -w '%{http_code}' -u "$AUTH" -X "$method" \
+        -H 'Content-Type: application/json' ${data:+-d "$data"} "$API$path")
+    if [[ $code != 2* ]]; then
+        echo "::error title=API $method $path -> $code::$(head -c 1500 "$body" | tr '\n' ' ')"
+        exit 1
+    fi
+    cat "$body"
 }
 field() { python3 -c "import json,sys; print(json.load(sys.stdin)$1)"; }
 
@@ -21,7 +27,10 @@ inv=$(api POST /inventories/ "{\"name\": \"ci-local\", \"organization\": $org}" 
 api POST "/inventories/$inv/hosts/" \
     '{"name": "localhost", "variables": "ansible_connection: local\nansible_python_interpreter: /usr/bin/python3"}' >/dev/null
 
-job=$(api POST /ad_hoc_commands/ "{\"inventory\": $inv, \"module_name\": \"ping\", \"limit\": \"localhost\"}" | field '["id"]')
+machine=$(api GET "/credential_types/?kind=ssh&managed=true" | field '["results"][0]["id"]')
+cred=$(api POST /credentials/ "{\"name\": \"ci-local\", \"organization\": $org, \"credential_type\": $machine, \"inputs\": {}}" | field '["id"]')
+
+job=$(api POST /ad_hoc_commands/ "{\"inventory\": $inv, \"credential\": $cred, \"module_name\": \"ping\", \"limit\": \"localhost\"}" | field '["id"]')
 echo "ad-hoc command $job launched"
 
 status=pending
