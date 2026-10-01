@@ -123,9 +123,14 @@ services:
 
   # Receptor node "awx-task". Runs each job with ansible-runner, which starts
   # the job's execution-environment image with podman - hence root and
-  # privileged. Same role as the "ee" sidecar the AWX Operator runs.
+  # privileged. Same role as the "ee" sidecar the AWX Operator runs; the
+  # image is awx-ee plus podman (see receptor/Dockerfile).
   awx-ee:
-    image: ${AWX_EE_IMAGE}
+    build:
+      context: ./receptor
+      args:
+        AWX_EE_IMAGE: ${AWX_EE_IMAGE}
+    image: awx-receptor:local
     restart: unless-stopped
     hostname: awx-task
     user: "0"
