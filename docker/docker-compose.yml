@@ -7,8 +7,8 @@
 # Layout follows what the AWX Operator runs on Kubernetes, split into
 # containers instead of pods:
 #   awx-web   nginx + uwsgi + daphne (UI and API)          :8052 -> AWX_HTTP_PORT
-#   awx-task  dispatcher + callback receiver + receptor;   runs jobs in
-#             execution-environment containers via podman
+#   awx-task  dispatcher, callback receiver, websocket relay
+#   awx-ee    receptor; runs each job in an execution-environment container (podman)
 #   postgres  AWX database
 #   redis     shared by web and task over a unix socket
 #   awx-init  one-shot: migrations, admin user, instance + queue registration
@@ -99,30 +99,53 @@ services:
       retries: 20
       start_period: 60s
 
-  # Runs as root and privileged so podman can start execution-environment
-  # containers for each job. This is the same trade-off a VM install makes.
+  # Dispatcher, callback receiver and wsrelay. Hands jobs to receptor in
+  # awx-ee over the shared control socket.
   awx-task:
     <<: *awx
     hostname: awx-task
     user: "0"
-    privileged: true
     command: ["/bin/bash", "/opt/awx/task-entrypoint.sh"]
     volumes:
       - ./config/settings.py:/etc/tower/settings.py:ro
       - ./config/credentials.py:/etc/tower/conf.d/credentials.py:ro
       - ./config/execution_environments.py:/etc/tower/conf.d/execution_environments.py:ro
       - ./config/receptor.conf:/etc/receptor/receptor.conf:ro
-      - ./config/containers.conf:/etc/containers/containers.conf.d/awx.conf:ro
       - ./scripts/task-entrypoint.sh:/opt/awx/task-entrypoint.sh:ro
       - redis-socket:/var/run/redis
+      - receptor-socket:/var/run/receptor
       - awx-projects:/var/lib/awx/projects
-      - ee-images:/var/lib/containers
     depends_on:
       awx-init:
         condition: service_completed_successfully
+      awx-ee:
+        condition: service_healthy
+
+  # Receptor node "awx-task". Runs each job with ansible-runner, which starts
+  # the job's execution-environment image with podman - hence root and
+  # privileged. Same role as the "ee" sidecar the AWX Operator runs.
+  awx-ee:
+    image: ${AWX_EE_IMAGE}
+    restart: unless-stopped
+    hostname: awx-task
+    user: "0"
+    privileged: true
+    command: ["receptor", "--config", "/etc/receptor/receptor.conf"]
+    volumes:
+      - ./config/receptor.conf:/etc/receptor/receptor.conf:ro
+      - ./config/containers.conf:/etc/containers/containers.conf.d/awx.conf:ro
+      - receptor-socket:/var/run/receptor
+      - awx-projects:/var/lib/awx/projects
+      - ee-images:/var/lib/containers
+    healthcheck:
+      test: ["CMD", "receptorctl", "--socket", "/var/run/receptor/receptor.sock", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
 volumes:
   postgres-data:
   redis-socket:
   awx-projects:
+  receptor-socket:
   ee-images:

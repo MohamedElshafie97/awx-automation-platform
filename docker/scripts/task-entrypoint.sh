@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# awx-task entrypoint: start receptor, then the AWX task services
-# (dispatcher, callback receiver, wsrelay) under supervisord.
+# awx-task entrypoint: wait for receptor (awx-ee) and migrations, then start
+# the AWX task services (dispatcher, callback receiver, wsrelay).
 #
 # AWX's own launch_awx_task.sh isn't used because it calls
 # `awx-manage provision_instance` without a hostname, which is the
@@ -10,15 +10,11 @@
 
 set -euo pipefail
 
-mkdir -p /var/run/receptor
-receptor --config /etc/receptor/receptor.conf &
-
-# Don't let AWX submit work before the control socket exists
-for _ in $(seq 1 30); do
+for _ in $(seq 1 60); do
     [[ -S /var/run/receptor/receptor.sock ]] && break
     sleep 1
 done
-[[ -S /var/run/receptor/receptor.sock ]] || { echo "receptor did not start" >&2; exit 1; }
+[[ -S /var/run/receptor/receptor.sock ]] || { echo "receptor socket not found - is awx-ee running?" >&2; exit 1; }
 
 wait-for-migrations
 

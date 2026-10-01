@@ -60,6 +60,11 @@ jobs:
           echo "::error title=instances::$cap"
           exit 1
 
+      - name: Run a job end to end
+        run: |
+          set -a; source docker/.env; set +a
+          bash ci/smoke-job.sh
+
       - name: Diagnose
         if: failure()
         run: bash ci/diagnose.sh
