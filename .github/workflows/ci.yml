@@ -1,0 +1,65 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install yamllint
+      - run: yamllint .
+      - run: shellcheck -S warning scripts/*.sh docker/scripts/*.sh ci/*.sh
+      - run: python -m py_compile docker/config/*.py
+      - name: Compose file is valid
+        working-directory: docker
+        run: |
+          cp .env.example .env && ../scripts/generate-secrets.sh >> .env
+          docker compose config --quiet
+
+  # Bring the real stack up on the runner and prove it works end to end.
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start AWX
+        working-directory: docker
+        run: |
+          cp .env.example .env
+          ../scripts/generate-secrets.sh >> .env
+          docker compose up -d
+
+      - name: Wait for the API
+        run: |
+          for i in $(seq 1 120); do
+            if curl -fs http://127.0.0.1:8080/api/v2/ping/ > /tmp/ping.json; then
+              cat /tmp/ping.json; exit 0
+            fi
+            sleep 5
+          done
+          exit 1
+
+      - name: Instance registered with capacity
+        run: |
+          set -a; source docker/.env; set +a
+          for i in $(seq 1 30); do
+            cap=$(curl -fs -u "admin:${DJANGO_SUPERUSER_PASSWORD}" http://127.0.0.1:8080/api/v2/instances/ \
+                  | python3 -c 'import json,sys; r=json.load(sys.stdin)["results"]; print(" ".join("%s:%s:%s" % (i["hostname"], i["node_type"], i["capacity"]) for i in r))')
+            echo "$cap"
+            echo "$cap" | grep -qE 'awx-task:hybrid:[1-9]' && exit 0
+            sleep 10
+          done
+          echo "::error title=instances::$cap"
+          exit 1
+
+      - name: Diagnose
+        if: failure()
+        run: bash ci/diagnose.sh

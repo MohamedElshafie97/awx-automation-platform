@@ -1,0 +1,125 @@
+# AWX on a single host with Docker Compose.
+#
+#   cp .env.example .env && ../scripts/generate-secrets.sh >> .env
+#   docker compose up -d
+#   docker compose logs -f awx-init      # first start: migrations take a few minutes
+#
+# Layout follows what the AWX Operator runs on Kubernetes, split into
+# containers instead of pods:
+#   awx-web   nginx + uwsgi + daphne (UI and API)          :8052 -> AWX_HTTP_PORT
+#   awx-task  dispatcher + callback receiver + receptor;   runs jobs in
+#             execution-environment containers via podman
+#   postgres  AWX database
+#   redis     shared by web and task over a unix socket
+#   awx-init  one-shot: migrations, admin user, instance + queue registration
+
+name: awx
+
+x-awx: &awx
+  image: quay.io/ansible/awx:${AWX_VERSION}
+  restart: unless-stopped
+  env_file: .env
+  environment: &awx-env
+    AWX_LOGGING_MODE: stdout
+  volumes: &awx-volumes
+    - ./config/settings.py:/etc/tower/settings.py:ro
+    - ./config/credentials.py:/etc/tower/conf.d/credentials.py:ro
+    - ./config/execution_environments.py:/etc/tower/conf.d/execution_environments.py:ro
+    - redis-socket:/var/run/redis
+    - awx-projects:/var/lib/awx/projects
+
+services:
+  postgres:
+    image: docker.io/library/postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${AWX_PG_DATABASE}
+      POSTGRES_USER: ${AWX_PG_USER}
+      POSTGRES_PASSWORD: ${AWX_PG_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${AWX_PG_USER} -d ${AWX_PG_DATABASE}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: docker.io/library/redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    volumes:
+      - ./config/redis.conf:/usr/local/etc/redis/redis.conf:ro
+      - redis-socket:/var/run/redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "-s", "/var/run/redis/redis.sock", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  awx-init:
+    <<: *awx
+    restart: "no"
+    user: "0"
+    command: ["/bin/bash", "/opt/awx/init.sh"]
+    volumes:
+      - ./config/settings.py:/etc/tower/settings.py:ro
+      - ./config/credentials.py:/etc/tower/conf.d/credentials.py:ro
+      - ./config/execution_environments.py:/etc/tower/conf.d/execution_environments.py:ro
+      - ./scripts/init.sh:/opt/awx/init.sh:ro
+      - redis-socket:/var/run/redis
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  awx-web:
+    <<: *awx
+    hostname: awx-web
+    command: ["/usr/bin/launch_awx_web.sh"]
+    volumes:
+      - ./config/settings.py:/etc/tower/settings.py:ro
+      - ./config/credentials.py:/etc/tower/conf.d/credentials.py:ro
+      - ./config/execution_environments.py:/etc/tower/conf.d/execution_environments.py:ro
+      - ./config/nginx.conf:/etc/nginx/nginx.conf:ro
+      - redis-socket:/var/run/redis
+    ports:
+      - "${AWX_HTTP_PORT:-8080}:8052"
+    depends_on:
+      awx-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://127.0.0.1:8052/api/v2/ping/ >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+
+  # Runs as root and privileged so podman can start execution-environment
+  # containers for each job. This is the same trade-off a VM install makes.
+  awx-task:
+    <<: *awx
+    hostname: awx-task
+    user: "0"
+    privileged: true
+    command: ["/bin/bash", "/opt/awx/task-entrypoint.sh"]
+    volumes:
+      - ./config/settings.py:/etc/tower/settings.py:ro
+      - ./config/credentials.py:/etc/tower/conf.d/credentials.py:ro
+      - ./config/execution_environments.py:/etc/tower/conf.d/execution_environments.py:ro
+      - ./config/receptor.conf:/etc/receptor/receptor.conf:ro
+      - ./config/containers.conf:/etc/containers/containers.conf.d/awx.conf:ro
+      - ./scripts/task-entrypoint.sh:/opt/awx/task-entrypoint.sh:ro
+      - redis-socket:/var/run/redis
+      - awx-projects:/var/lib/awx/projects
+      - ee-images:/var/lib/containers
+    depends_on:
+      awx-init:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-data:
+  redis-socket:
+  awx-projects:
+  ee-images:

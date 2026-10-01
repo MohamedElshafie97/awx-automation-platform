@@ -1,0 +1,5 @@
+docker/.env
+docker/.env.before-restore
+*.retry
+__pycache__/
+awx-config/vars/secrets.yml
