@@ -52,7 +52,7 @@ jobs:
           set -a; source docker/.env; set +a
           for i in $(seq 1 30); do
             cap=$(curl -fs -u "admin:${DJANGO_SUPERUSER_PASSWORD}" http://127.0.0.1:8080/api/v2/instances/ \
-                  | python3 -c 'import json,sys; r=json.load(sys.stdin)["results"]; print(" ".join("%s:%s:%s" % (i["hostname"], i["node_type"], i["capacity"]) for i in r))')
+                  | python3 ci/instances.py)
             echo "$cap"
             echo "$cap" | grep -qE 'awx-task:hybrid:[1-9]' && exit 0
             sleep 10
