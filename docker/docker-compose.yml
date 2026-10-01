@@ -47,7 +47,10 @@ services:
   redis:
     image: docker.io/library/redis:7-alpine
     restart: unless-stopped
-    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    # The socket directory is a shared volume owned by root; open it up
+    # before redis drops to its own user so it can create the socket.
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["chmod 0777 /var/run/redis && exec docker-entrypoint.sh redis-server /usr/local/etc/redis/redis.conf"]
     volumes:
       - ./config/redis.conf:/usr/local/etc/redis/redis.conf:ro
       - redis-socket:/var/run/redis
